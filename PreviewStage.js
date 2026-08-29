@@ -1,5 +1,5 @@
 import React, { Component, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Image, StyleSheet, Text, View } from 'react-native';
+import { Image, Platform, StyleSheet, Text, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { FRAME, asClipList, clipAtCompositionTime, sourceTimeForClip, clipSpeed, clipVolume, clipMuted, clipTransitionOut, clipTransitionDurationMs, volumeAtClipTime } from './TimelineEngine';
 import { keysFor, staticValue } from './clipKeys';
@@ -12,6 +12,8 @@ import { canvasAspectOf, fitCanvas, mediaAspectOf } from './editorCanvas';
 import Animated, { runOnJS, useAnimatedReaction, useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 
 export const NATIVE_COMPOSITOR_ENABLED = true;
+/** Image/thumbBank preview avoids Android TextureView green screen. */
+export const PREVIEW_FORCE_IMAGE = true;
 
 function PreviewFallback({ clockLabel, message }) {
   return (
@@ -482,7 +484,7 @@ function PreviewXform({
     >
       <Animated.View
         collapsable={false}
-        renderToHardwareTextureAndroid={!!rasterize}
+        renderToHardwareTextureAndroid={Platform.OS === 'android' ? false : !!rasterize}
         shouldRasterizeIOS={!!rasterize}
         style={[styles.layer, { width: canvasW, height: canvasH }, layerStyle]}
       >
@@ -529,7 +531,7 @@ function CanvasFrameImage({ clips, clipsLiveRef, timeSv, width, height, freezeSv
     };
 
     const queueFrame = (fileUri, atSec, gen) => {
-      requestThumb(fileUri, atSec, 12).then((frame) => {
+      requestThumb(fileUri, atSec, 20).then((frame) => {
         if (genRef.current !== gen || !frame?.uri) return;
         showFrame(frame.uri);
       }).catch(() => {
@@ -585,7 +587,15 @@ function CanvasFrameImage({ clips, clipsLiveRef, timeSv, width, height, freezeSv
   return (
     <Image
       source={{ uri }}
-      style={{ position: 'absolute', left: 0, top: 0, width, height, backgroundColor: '#000000' }}
+      style={{
+        position: 'absolute',
+        left: 0,
+        top: 0,
+        width,
+        height,
+        zIndex: 2,
+        backgroundColor: '#000000',
+      }}
       resizeMode="cover"
       fadeDuration={0}
       pointerEvents="none"
@@ -598,13 +608,13 @@ function PosterStill({
   clipsLiveRef,
   timeSv,
   playingSv,
-  message,
   liveXfSv,
   packKey,
   canvasEnabled,
   onCommit,
   canvasWidth = 0,
   canvasHeight = 0,
+  seekRef,
 }) {
   const [box, setBox] = useState({
     width: Math.max(0, Number(canvasWidth) || 0),
@@ -616,29 +626,24 @@ function PosterStill({
     if (width < 2 || height < 2) return;
     setBox((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
   }, [canvasWidth, canvasHeight]);
-  const [uri, setUri] = useState(() => stillUriOf(asClipList(clips)[0]));
-  const pick = useCallback((time) => {
-    const list = clipsLiveRef?.current || clips;
-    const clip = clipAtCompositionTime(list, time) || asClipList(list)[0];
-    const next = stillUriOf(clip);
-    setUri((prev) => (next && next !== prev ? next : prev));
-  }, [clips, clipsLiveRef]);
-
-  useAnimatedReaction(
-    () => (timeSv ? Math.round(timeSv.value * 2) : 0),
-    (bucket, previous) => {
-      if (bucket === previous) return;
-      runOnJS(pick)(timeSv?.value || 0);
-    }
-  );
 
   useEffect(() => {
-    pick(timeSv?.value || 0);
-  }, [clips, pick, timeSv]);
+    if (!seekRef) return undefined;
+    seekRef.current = {
+      applyTime: () => {},
+      playNow: () => {},
+      pauseNow: () => {},
+      setRate: () => {},
+      armRate: () => {},
+      setVolume: () => {},
+      warmupRate: () => {},
+    };
+    return () => {
+      if (seekRef) seekRef.current = null;
+    };
+  }, [seekRef]);
 
-  const prepStyle = useAnimatedStyle(() => ({
-    opacity: playingSv?.value ? 1 : 0.85,
-  }));
+  const ready = box.width >= 2 && box.height >= 2;
 
   return (
     <View
@@ -651,28 +656,20 @@ function PosterStill({
         setBox((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
       }}
     >
-      <PreviewXform
-        clips={clips}
-        clipsLiveRef={clipsLiveRef}
-        timeSv={timeSv}
-        width={box.width}
-        height={box.height}
-        liveXfSv={liveXfSv}
-        playingSv={playingSv}
-        packKey={packKey}
-        canvasEnabled={canvasEnabled}
-        onCommit={onCommit}
-        rasterize
-      >
-        {uri ? (
-          <Image
-            source={{ uri }}
-            style={{ position: 'absolute', left: 0, top: 0, width: box.width, height: box.height }}
-            resizeMode="cover"
-            fadeDuration={0}
-            pointerEvents="none"
-          />
-        ) : (
+      {ready ? (
+        <PreviewXform
+          clips={clips}
+          clipsLiveRef={clipsLiveRef}
+          timeSv={timeSv}
+          width={box.width}
+          height={box.height}
+          liveXfSv={liveXfSv}
+          playingSv={playingSv}
+          packKey={packKey}
+          canvasEnabled={canvasEnabled}
+          onCommit={onCommit}
+          rasterize={Platform.OS !== 'android'}
+        >
           <CanvasFrameImage
             clips={clips}
             clipsLiveRef={clipsLiveRef}
@@ -680,11 +677,8 @@ function PosterStill({
             width={box.width}
             height={box.height}
           />
-        )}
-      </PreviewXform>
-      <Animated.View pointerEvents="none" style={[styles.prepWrap, prepStyle]}>
-        <Text style={styles.prepText}>Preparando preview 360p…</Text>
-      </Animated.View>
+        </PreviewXform>
+      ) : null}
     </View>
   );
 }
@@ -838,17 +832,22 @@ export const PreviewStage = memo(function PreviewStage({
       clipsLiveRef={clipsLiveRef}
       timeSv={timeSv}
       playingSv={playingSv}
-      message={hasClips ? 'Preparando preview fluido…' : 'Importa un video desde Galería para previsualizar.'}
       liveXfSv={liveXfSv}
       packKey={packKey}
       canvasEnabled={canvasEnabled}
       onCommit={onCommitXform}
       canvasWidth={canvas.width}
       canvasHeight={canvas.height}
+      seekRef={seekRef}
     />
   );
 
-  const proxyPlayer = (proxyUri && video?.useVideoPlayer && video?.VideoView)
+  const proxyPlayer = (
+    !PREVIEW_FORCE_IMAGE
+    && proxyUri
+    && video?.useVideoPlayer
+    && video?.VideoView
+  )
     ? (
       <PreviewVideoMemo
         VideoView={video.VideoView}
@@ -1439,7 +1438,7 @@ function PreviewVideo({
           packKey={packKey}
           canvasEnabled={canvasEnabled}
           onCommit={onCommit}
-          rasterize={!livePlay}
+          rasterize={Platform.OS !== 'android' && !livePlay}
           onArm={() => setLivePlay(false)}
         >
           <CanvasFrameImage
@@ -1452,10 +1451,10 @@ function PreviewVideo({
           {livePlay ? (
             <VideoView
               player={player}
-              style={{ position: 'absolute', left: 0, top: 0, width: cw, height: ch }}
+              style={{ position: 'absolute', left: 0, top: 0, width: cw, height: ch, zIndex: 1 }}
               nativeControls={false}
               contentFit="cover"
-              surfaceType="textureView"
+              surfaceType={Platform.OS === 'android' ? 'surfaceView' : 'textureView'}
               pointerEvents="none"
             />
           ) : null}
