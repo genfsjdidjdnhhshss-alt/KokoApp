@@ -4,7 +4,8 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { FRAME, asClipList, clipAtCompositionTime, sourceTimeForClip, clipSpeed, clipVolume, clipMuted, clipTransitionOut, clipTransitionDurationMs, volumeAtClipTime } from './TimelineEngine';
 import { keysFor, staticValue } from './clipKeys';
 import { grabFrame, peekExactThumb, peekThumb, resolveScrubSource, setFilmstripPaused } from './scrubFilmstrip';
-import { immediatePlayUri, isFullPreviewProxy, previewUriOf, setPreviewBakePaused } from './previewProxy';
+import { immediatePlayUri, isFullPreviewProxy, originalUriOf, setPreviewBakePaused } from './previewProxy';
+import { requestThumb } from './thumbBank';
 import { loadExpoVideo } from './mediaNative';
 import { toImageUri } from './clipPoster';
 import { canvasAspectOf, fitCanvas, mediaAspectOf } from './editorCanvas';
@@ -517,25 +518,49 @@ function CanvasFrameImage({ clips, clipsLiveRef, timeSv, width, height, freezeSv
     const list = clipsLiveRef?.current || clips;
     const clip = clipAtCompositionTime(list, time) || asClipList(list)[0];
     const fallback = stillUriOf(clip);
+    const sourceSec = sourceTimeForClip(clip, time);
+    const timelineUri = originalUriOf(clip);
+
+    const showFrame = (frameUri) => {
+      const ready = frameUri ? toImageUri(frameUri) : null;
+      if (!ready) return false;
+      setUri((prev) => (ready !== prev ? ready : prev));
+      return true;
+    };
+
+    const queueFrame = (fileUri, atSec, gen) => {
+      requestThumb(fileUri, atSec, 12).then((frame) => {
+        if (genRef.current !== gen || !frame?.uri) return;
+        showFrame(frame.uri);
+      }).catch(() => {
+        if (fallback) setUri((prev) => (prev ? prev : fallback));
+      });
+    };
+
+    // D: same thumb path as the timeline filmstrip (original URI).
+    if (timelineUri) {
+      const cached = peekThumb(timelineUri, sourceSec);
+      if (cached?.uri && showFrame(cached.uri)) return;
+      if (fallback) setUri((prev) => (prev ? prev : fallback));
+      const gen = genRef.current + 1;
+      genRef.current = gen;
+      queueFrame(timelineUri, sourceSec, gen);
+      return;
+    }
+
     const src = resolveScrubSource(list, time);
     if (!src?.uri) {
       if (fallback) setUri((prev) => (fallback !== prev ? fallback : prev));
       return;
     }
     const cached = peekExactThumb(src.uri, src.sourceSec);
-    const ready = cached ? toImageUri(cached) : null;
-    if (ready) {
-      setUri((prev) => (ready !== prev ? ready : prev));
-      return;
-    }
+    if (cached && showFrame(cached)) return;
     if (fallback) setUri((prev) => (prev ? prev : fallback));
     const gen = genRef.current + 1;
     genRef.current = gen;
     grabFrame(src.uri, src.sourceSec).then((path) => {
       if (genRef.current !== gen) return;
-      const next = toImageUri(path);
-      if (!next) return;
-      setUri((prev) => (next !== prev ? next : prev));
+      showFrame(path);
     }).catch(() => {
       if (fallback) setUri((prev) => (prev ? prev : fallback));
     });
