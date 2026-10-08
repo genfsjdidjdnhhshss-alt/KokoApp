@@ -20,4 +20,4 @@ Ejecuta `supabase/schema.sql` en tu proyecto Supabase e inserta filas en `videos
 - `src/components/VideoFeed.tsx` — lista vertical con reproducción
 - `supabase/schema.sql` — `profiles` + `videos`
 
-Documentación detallada: Agent Store → `docs/koko-core-base.md`.
+Documentación detallada: `docs/koko-core-base.md` y `docs/koko-file-index.md`.
